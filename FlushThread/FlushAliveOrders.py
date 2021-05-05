@@ -47,7 +47,7 @@ def flushAliveOrders():
                         holdings.bought_price = order.stock_price
                         holdings.bought_total_price += order.order_money_amount
                     else:
-                        holdings = UserHoldings(order.user_id, order.stock_name, order.stock_amount, order.stock_price,
+                        holdings = UserHoldings(order.user_id, order.stock_name, order.stock_amount, stock.now_price,
                                                 order.order_money_amount, datetime.now())
                         dbo.add(holdings)
                 dbo.update()

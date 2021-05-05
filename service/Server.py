@@ -8,12 +8,13 @@ from datetime import datetime
 from FlushThread.FlushStockInformation import flushOneNow
 from FlushThread.FlushStockInformation import flushAliveOrders
 from domain.AllStock import AllStock
+import tushare as ts
+import requests
+import json
 
 begin_money = 500000
+last_BTC = 58313.255
 
-
-# TODO
-# 返回值要改掉，应该改成str.format()方法
 
 class Server:
     def outTime(self):
@@ -29,7 +30,6 @@ class Server:
 
     async def register(self, user_id: str, user_name: str) -> str:
         dbo = DataBaseOperator()
-        print(user_id, user_name)
         if dbo.searchOne(UserInformation, UserInformation.user_id, user_id):
             return "您已注册\n" + user_id + "\n" + user_name
         else:
@@ -42,27 +42,48 @@ class Server:
         dbo = DataBaseOperator()
         obj = dbo.searchOne(StockInformation, StockInformation.stock_name, stock_name)
         if obj:
-            return "自选股已经被添加过\n" + + obj.stock_name
+            return "自选股已经被添加过\n" + obj.stock_name
         else:
-            stock_id = dbo.searchOne(AllStock, AllStock.stock_name, stock_name).stock_id
-            new_obj = StockInformation(stock_id=stock_id, stock_name=stock_name, now_price=-1,
-                                       flush_time=datetime.now(),
-                                       up_down_rate=0)
-            dbo.add(new_obj)
-            stock_name = flushOneNow(stock_id)
-            return "自选股添加成功\n" + str(stock_name)
+            stock = dbo.searchOne(AllStock, AllStock.stock_name, stock_name)
+            if stock:
+                new_obj = StockInformation(stock_id=stock.stock_id, stock_name=stock_name, now_price=-1,
+                                           flush_time=datetime.now(),
+                                           up_down_rate=0)
+                dbo.add(new_obj)
+                flushOneNow(stock.stock_id)
+                return "自选股添加成功\n" + str(stock_name)
+            else:
+                return "自选股添加失败，API缺少该股信息"
 
     async def addSelfStockWithID(self, stock_id: str) -> str:
         dbo = DataBaseOperator()
         obj = dbo.searchOne(StockInformation, StockInformation.stock_id, stock_id)
         if obj:
-            return "自选股已经被添加过\n" + + obj.stock_name
+            return "自选股已经被添加过\n" + obj.stock_name
         else:
-            new_obj = StockInformation(stock_id=stock_id, stock_name="暂未查询", now_price=-1,
-                                       flush_time=datetime.now(),
-                                       up_down_rate=0)
-            dbo.add(new_obj)
-            stock_name = flushOneNow(stock_id)
+            try:
+                df = ts.get_realtime_quotes(stock_id)
+                stock_name = df['name'][0].replace(' ', '')
+                now_price = float(df['price'])
+                flush_time = datetime.strptime(df['date'][0] + " " + df['time'][0], '%Y-%m-%d %H:%M:%S')
+            except:
+                return "API缺少该股信息"
+            try:
+                up_down_rate = 100 * (float(df['price'][0]) - float(df['pre_close'][0])) / float(
+                    df['pre_close'][0])
+            except:
+                up_down_rate = 0
+            new_obj = StockInformation(stock_id=stock_id, stock_name=stock_name, now_price=now_price,
+                                       flush_time=flush_time,
+                                       up_down_rate=up_down_rate)
+            try:
+                dbo.add(new_obj)
+            except:
+                pass
+            # 下面，添加到all_stock中
+            new_stock = AllStock(stock_id=stock_id, stock_name=stock_name)
+            dbo.add(new_stock)
+            flushOneNow(stock_id)
             return "自选股添加成功\n" + str(stock_name)
 
     async def buyStock(self, user_id: str, stock_name: str, stock_amount: int, stock_price: float) -> str:
@@ -80,7 +101,10 @@ class Server:
             obj = dbo.searchOne(StockInformation, StockInformation.stock_name, stock_name)
             stock_id = obj.stock_id
             order_money_amount = stock_amount * stock_price
-            free_money_amount = dbo.searchOne(UserInformation, UserInformation.user_id, user_id).free_money_amount
+            try:
+                free_money_amount = dbo.searchOne(UserInformation, UserInformation.user_id, user_id).free_money_amount
+            except:
+                return "没有找到您的信息，请先注册"
             if free_money_amount < order_money_amount:
                 return "购买订单创建失败，可支配金额不足"
             else:
@@ -109,7 +133,7 @@ class Server:
         stock_amount_obj = dbo.searchOneWithTwoFields(UserHoldings, UserHoldings.stock_name, stock_name,
                                                       UserHoldings.user_id, user_id)
         if not stock_amount_obj:
-            return "卖出订单创建失败，您没有购买该支股票"
+            return "卖出订单创建失败，没有查询到您的持仓记录"
         else:
             now = datetime.now().strftime('%Y-%m-%d')
             bought_time = stock_amount_obj.bought_time.strftime('%Y-%m-%d')
@@ -123,7 +147,10 @@ class Server:
                     alive_order_index = aoi[-1].alive_order_index + 1
                 else:
                     alive_order_index = 1
-                stock_id = dbo.searchOne(StockInformation, StockInformation.stock_name, stock_name).stock_id
+                try:
+                    stock_id = dbo.searchOne(StockInformation, StockInformation.stock_name, stock_name).stock_id
+                except:
+                    return "卖出订单创建失败，自选股被非法删除，请联系管理员"
                 alive_order = AliveOrder(user_id=user_id, alive_order_index=alive_order_index,
                                          alive_order_time=datetime.now(),
                                          buy_or_sell=False, stock_id=stock_id,
@@ -156,6 +183,7 @@ class Server:
 
     async def searchAliveOrders(self, user_id: str) -> str:
         dbo = DataBaseOperator()
+        flushAliveOrders()
         dbo.delete(AliveOrder, AliveOrder.is_alive, False)
         aliveorders = dbo.searchAllWithField(AliveOrder, AliveOrder.user_id, user_id)
         if not aliveorders:
@@ -174,23 +202,26 @@ class Server:
     async def searchUserInformation(self, user_id: str) -> str:
         dbo = DataBaseOperator()
         user = dbo.searchOne(UserInformation, UserInformation.user_id, user_id)
+        if not user:
+            return "查询失败，您尚未注册"
         holdings = dbo.searchAllWithField(UserHoldings, UserHoldings.user_id, user_id)
         user.total_money_amount = 0
         for holding in holdings:
-            price_now = dbo.searchOne(StockInformation, StockInformation.stock_name, holding.stock_name).now_price
-            user.total_money_amount += holding.stock_amount * price_now
+            try:
+                price_now = dbo.searchOne(StockInformation, StockInformation.stock_name, holding.stock_name).now_price
+                user.total_money_amount += holding.stock_amount * price_now
+            except:
+                return "查询个人信息失败，自选股被非法删除，请联系管理员"
         user.total_money_amount += user.free_money_amount
-        if not user:
-            return "您尚未注册"
+        dbo.update()
+        rst = "您好，{},您当前的账户信息如下：\n".format(user_id)
+        if type(user) == list:
+            for item in user:
+                rst += str(item) + "\n"
+                rst += "-------------\n"
         else:
-            rst = "您好，{},您当前的账户信息如下：\n".format(user_id)
-            if type(user) == list:
-                for item in user:
-                    rst += str(item) + "\n"
-                    rst += "-------------\n"
-            else:
-                rst += str(user)
-            return rst
+            rst += str(user)
+        return rst
 
     async def searchStock(self):
         dbo = DataBaseOperator()
@@ -218,24 +249,69 @@ class Server:
         if orders or holdings:
             return "已有订单或持仓，不能删除"
         else:
-            name = stock_name
-            dbo.delete(StockInformation, StockInformation.stock_name, stock_name)
-            return stock_name + "删除成功"
+            if dbo.searchOne(StockInformation, StockInformation.stock_name, stock_name):
+                dbo.delete(StockInformation, StockInformation.stock_name, stock_name)
+                return stock_name + "删除成功"
+            else:
+                return "您要删除的自选股不存在，喂！不要乱玩这个功能！"
 
     async def help(self):
-        s = "使用命令:\n！注册：注册您的账户\n！添加 股票名\n！删除 股票名" \
+        s = "使用命令:\n！注册\n！添加 股票名\n！用编号添加 股票编号\n！删除 股票名\n" \
             + "！买入 股票名 购买价格 购买数量\n" + \
             "！卖出 股票名 卖出价格 卖出数量\n！持仓\n！订单\n！信息\n！取消订单 订单id" \
-            + "\n！查询 股票名" + "\n感谢您的使用"
+            + "\n！查询 股票名\n！用编号查询 股票编号" + "\n感谢您的使用"
         return s
+
+    async def dzyPa(self):
+        return "dzy爬"
 
     async def searchOneStock(self, stock_name):
         dbo = DataBaseOperator()
+        try:
+            stock_id = dbo.searchOne(AllStock, AllStock.stock_name, stock_name).stock_id
+        except:
+            return "查询失败，API缺少该股信息"
         obj = dbo.searchOne(StockInformation, StockInformation.stock_name, stock_name)
         if obj:
-            return str(obj)
+            if flushOneNow(stock_id):
+                obj = dbo.searchOne(StockInformation, StockInformation.stock_name, stock_name)
+                return str(obj)
+            else:
+                return "API查询失败，请稍后再次尝试"
         else:
-            return "未找到股票"
+            return "查询失败，请先添加自选股"
+
+    async def searchOneStockWithID(self, stock_id):
+        dbo = DataBaseOperator()
+        obj = dbo.searchOne(StockInformation, StockInformation.stock_id, stock_id)
+        if obj:
+            if flushOneNow(stock_id):
+                obj = dbo.searchOne(StockInformation, StockInformation.stock_id, stock_id)
+                return str(obj)
+            else:
+                return "API查询失败，请稍后再次尝试"
+        else:
+            return "查询失败，请先添加自选股"
+
+    async def getBTC(self):
+        try:
+            r = requests.get('https://api.coindesk.com/v1/bpi/currentprice.json')
+            # old_r = requests.get('https://api.coindesk.com/v1/bpi/historical/close.json')
+            # old_day_data = old_r.json()['bpi']
+            # p_list = [key for key in old_day_data.values()]
+            # last_price = float(p_list[-1])
+            # print(last_price)
+            global last_BTC
+            now_price = float(r.json()['bpi']['USD']['rate_float'])
+            res = "BTC-USD：{:.3f}\n距上次查询幅度：{:.3f}%".format(now_price, 100 * (now_price - last_BTC) / last_BTC)
+            if 100 * abs(last_BTC - now_price) / last_BTC > 3:
+                last_BTC = now_price
+                return "与上一次查询变化超过3%！\n" + res
+            else:
+                last_BTC = now_price
+                return res
+        except:
+            return "ERROR: 请稍后尝试"
 
 
 if __name__ == "__main__":
@@ -248,4 +324,7 @@ if __name__ == "__main__":
     # print(server.searchUserInformation('326490366'))
     # print(server.cancelOrder('22', 1))
     # print(server.addSelfStock('000553'))
-    print(server.deleteSelfStock("全新好"))
+    # print(server.buyStock('326490366','中国平安',1000,79.45))
+    # print(server.searchUserInformation('326490366'))
+    # print(server.addSelfStock('平安银行'))
+    print(server.addSelfStock("远望谷"))
